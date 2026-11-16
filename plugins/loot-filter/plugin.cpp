@@ -272,6 +272,7 @@
 #endif
 
 #include "beam_recolor.h"
+#include "editor_bridge.h"
 #include "filter_engine.h"
 #include "filter_program.h"
 #include "json_value.h"
@@ -2450,6 +2451,114 @@ auto Evaluate(void* unit, Outcome& out) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+//  Editor bridge: what other plugins may read (editor_bridge_api.h)
+// ---------------------------------------------------------------------------
+static_assert(std::string_view(PluginIdText) == LootFilterBridge::ProviderPluginId);
+
+// The item the select tests last accepted, if it is still that item and on
+// the ground. UI thread.
+auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::HoveredItem& out) -> LootFilterBridge::Result {
+    // Looked up by id first, so a unit the game already freed is never read.
+    if (ClientUnit(unitId, UnitTypeItem) != unit || !IsItem(unit)) return LootFilterBridge::Result::NoItem;
+    GameItem item(unit);
+    if (!item.Valid() || item.Where() != Location::Ground) return LootFilterBridge::Result::NoItem;
+    const std::uint64_t revision = Revision.load();  // read first: an answer is never newer than its revision
+    Outcome outcome;
+    if (!Evaluate(unit, outcome)) {
+        // Without a filter the item has no outcome; with one, evaluating failed.
+        std::shared_lock<std::shared_mutex> lock(FilterLock);
+        if (Current.program) return LootFilterBridge::Result::Failed;
+    }
+    out.unitId        = unitId;
+    CopyLimited(out.code, sizeof(out.code), UnpackItemCode(item.Code()));
+    CopyLimited(out.name, sizeof(out.name), EditorBridge::PlainText(item.DisplayName()));
+    out.quality       = item.Quality();
+    out.baseTier      = item.BaseTier();
+    out.itemLevel     = item.ItemLevel();
+    out.sockets       = item.Sockets();
+    out.maxSockets    = item.MaxSockets();
+    out.uniqueOrSetId = item.UniqueOrSetId();
+    out.ethereal      = item.Ethereal();
+    out.identified    = item.Identified();
+    out.runeword      = item.Runeword();
+    out.gold          = item.IsGold();
+    out.hidden        = outcome.hidden;
+    out.nameChanged   = outcome.nameChanged;
+    out.hiddenBy      = outcome.hiddenBy;
+    out.matchedCount  = static_cast<std::uint32_t>(outcome.matchedRules.size());
+    for (std::size_t i = 0; i < outcome.matchedRules.size() && i < LootFilterBridge::MaxMatchedRules; ++i) {
+        out.matchedRules[i] = outcome.matchedRules[i];
+    }
+    out.filterRevision = revision;
+    return LootFilterBridge::Result::Success;
+}
+
+// Any thread.
+auto BridgeFilterState(LootFilterBridge::FilterState& out) -> LootFilterBridge::Result {
+    out.revision       = Revision.load();  // read first, as above
+    out.showHidden     = ShowHidden.load();
+    out.hoverAvailable = Hooks.pickup;
+    LoadedFilter filter;
+    bool playSounds = true;
+    if (!Snapshot(filter, playSounds)) {
+        CopyLimited(out.failure, sizeof(out.failure), filter.failure);
+        return LootFilterBridge::Result::Success;
+    }
+    const FilterProgram& program = *filter.program;
+    out.loaded  = true;
+    out.shipped = filter.id.starts_with("shipped:");
+    CopyLimited(out.filterId, sizeof(out.filterId), filter.id);
+    std::wstring path;
+    std::wstring folder;
+    if (FilterPathOf(filter.id, path, folder)) CopyLimited(out.path, sizeof(out.path), Narrow(path));
+    CopyLimited(out.title, sizeof(out.title), filter.title);
+    out.level = filter.level;
+    const std::string language = LanguageNow();
+    for (const Level& level : program.levels) {
+        if (out.levelCount == LootFilterBridge::MaxLevels) break;
+        out.levelIds[out.levelCount] = level.id;
+        CopyLimited(out.levelNames[out.levelCount], sizeof(out.levelNames[out.levelCount]), LevelName(program, level.id, language));
+        ++out.levelCount;
+    }
+    out.ruleCount = static_cast<std::uint32_t>(program.rules.size());
+    out.errors    = static_cast<std::uint32_t>(filter.errors);
+    out.warnings  = static_cast<std::uint32_t>(filter.warnings);
+    out.textHash  = filter.textHash;
+    return LootFilterBridge::Result::Success;
+}
+
+// Any thread.
+auto BridgeRuleTitle(std::int32_t ruleNumber, std::string& title) -> LootFilterBridge::Result {
+    LoadedFilter filter;
+    bool playSounds = true;
+    if (!Snapshot(filter, playSounds)) return LootFilterBridge::Result::NoFilter;
+    for (const Rule& rule : filter.program->rules) {
+        if (rule.number != ruleNumber) continue;
+        title = rule.comment;
+        return LootFilterBridge::Result::Success;
+    }
+    return LootFilterBridge::Result::NotFound;
+}
+
+auto BridgeActive() -> bool { return Active.load(); }
+
+// Offered only once the plugin is active; the filter works the same without it.
+void PublishEditorBridge() noexcept {
+    EditorBridge::Publish(Context, EditorBridge::Callbacks{
+        .active       = &BridgeActive,
+        .describeItem = &BridgeDescribeItem,
+        .filterState  = &BridgeFilterState,
+        .ruleTitle    = &BridgeRuleTitle,
+        .queueChat    = &QueueOwnChat,
+    });
+}
+
+// The editor bridge's hovered item: the last item a select test accepted.
+void NoteHoveredItem(void* unit) noexcept {
+    if (IsItem(unit)) EditorBridge::NoteHover(unit, ReadAt<std::uint32_t>(static_cast<const std::uint8_t*>(unit), UnitIdOffset));
+}
+
+// ---------------------------------------------------------------------------
 //  Droplight: an overlay of the plugin's own on each matching ground item
 // ---------------------------------------------------------------------------
 constexpr std::size_t  DroplightNodeBytes = 0x100;
@@ -3234,12 +3343,16 @@ auto HiddenFromPickup(void* unit) noexcept -> bool {
 
 std::int64_t __fastcall HookUnitSelectTest(void* unit, std::int32_t x, std::int32_t y, std::int32_t mode, std::uint32_t skill) noexcept {
     if (HiddenFromPickup(unit)) return 0;
-    return OriginalUnitSelectTest(unit, x, y, mode, skill);
+    const std::int64_t result = OriginalUnitSelectTest(unit, x, y, mode, skill);
+    if (result != 0) NoteHoveredItem(unit);  // for the editor bridge; only records it
+    return result;
 }
 
 std::uint64_t __fastcall HookTargetSelectTest(void* controller, void* player, void* unit) noexcept {
     if (HiddenFromPickup(unit)) return 0;
-    return OriginalTargetSelectTest(controller, player, unit);
+    const std::uint64_t result = OriginalTargetSelectTest(controller, player, unit);
+    if (result != 0) NoteHoveredItem(unit);  // for the editor bridge; only records it
+    return result;
 }
 
 auto ToFloats(const Rgba& color, float (&out)[4]) -> void {
@@ -4016,6 +4129,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         Active.store(true);
         State = PluginState::Active;
         LogInfo("LootFilter %s: active. Your filters: %s", PluginVersion, Narrow(UserFolder).c_str());
+        PublishEditorBridge();
     } catch (...) {
         State = PluginState::InstallFailed;
         LogError("LootFilter: installation failed with an exception.");
