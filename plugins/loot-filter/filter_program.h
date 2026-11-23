@@ -138,6 +138,7 @@ struct Conditions {
     std::vector<int>           excludeAreas;
     std::vector<int>           activeInLevels;  // empty = every level
     std::optional<Formula>     formula;         // the "formula" condition
+    std::optional<int>         chronicle;       // the ChronicleStatus that matches: 1 missing, 2 completed
 };
 
 struct Actions {
@@ -217,6 +218,7 @@ struct FilterProgram {
     Notifications      notifications;
     QualityColors      qualityColors;
     std::vector<Rule>  rules;
+    bool               usesChronicle{};  // an active rule has the "chronicle" condition
 
     [[nodiscard]] auto HasLevels() const noexcept -> bool { return !levels.empty(); }
     [[nodiscard]] auto FindLevel(int id) const noexcept -> const Level*;

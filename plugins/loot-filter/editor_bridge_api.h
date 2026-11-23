@@ -74,7 +74,8 @@ struct HoveredItem {
     // What the active filter does with it now.
     uint8_t  hidden;              // a rule hides it (it can only be pointed at with Show Hidden Items on)
     uint8_t  nameChanged;
-    uint8_t  reserved[2];
+    uint8_t  chronicle;           // ChronicleService::Status values: 0 not a Chronicle item, 1 missing, 2 completed, 3 unknown
+    uint8_t  reserved;
     int32_t  hiddenBy;            // the hiding rule's number; -1 hideUnmatchedItems; 0 not hidden
     uint32_t matchedCount;        // every rule that matched, possibly more than the list holds
     int32_t  matchedRules[MaxMatchedRules];  // rule numbers (1-based file order), in order

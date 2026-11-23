@@ -7,6 +7,9 @@
 //  2. A Set item, Unique item or Runeword on the ground whose entry the local
 //     character has not completed gets a "Not in Chronicle" line under its
 //     label (Alt labels and the hover name).
+//  3. Other plugins (the loot filter's "chronicle" condition) can ask the same
+//     question of any item through the chronicle service
+//     (chronicle_service_api.h).
 //
 //  Everything below was read out of the dumped D2RLoader 1.3.1 image (md5
 //  8af7a47c...). Every site is checked byte for byte at load; a part whose
@@ -78,6 +81,10 @@
 //  The text is the string Key ChronicleTrackerLabel; the colour marker is
 //  the one 0xCD6E0 writes, read once from it as the loot filter does.
 //
+//  The chronicle service answers with the same rules, wherever the item is.
+//  It is offered when the client checks below pass, even with the label line
+//  off in the config.
+//
 //  Console command "chronicletracker" shows the state and the counts.
 //  Settings: d2rloader/config/celestialrayone.chronicle-tracker.toml
 // =============================================================================
@@ -103,6 +110,7 @@
 #include <string>
 #include <string_view>
 
+#include "chronicle_service_api.h"
 #include "resource_ids.h"
 
 namespace CelestialRayOne::ChronicleTracker {
@@ -596,8 +604,10 @@ D2RL::Resources::RegistrationHandle StringsHandle{};
 
 std::atomic<bool> CompleteActive{};
 std::atomic<bool> LabelsActive{};
+std::atomic<bool> ServiceAvailable{};
 std::string       CompleteStatus = "not installed";
 std::string       LabelsStatus   = "not installed";
+std::string       ServiceStatus  = "not offered";
 std::string       VerifyFailures;
 
 std::atomic<std::uint64_t> CompletedPickup{};
@@ -661,6 +671,20 @@ auto ChronicleOf(void* player) noexcept -> void* {
     return NativeChronicleOf(player);
 }
 
+// The item's Chronicle status for the local character, wherever the item is.
+// The label line and the chronicle service both go by it.
+auto StatusOf(void* item) noexcept -> ChronicleService::Status {
+    using ChronicleService::Status;
+    if (item == nullptr || Read<std::uint32_t>(item, UnitTypeOffset) != UnitItem) return Status::Unknown;
+    Entry entry;
+    if (!EntryOf(item, entry)) return Status::NotTracked;
+    void* chronicle = ChronicleOf(NativeLocalPlayer(NativeLocalIndex()));
+    if (chronicle == nullptr) return Status::Unknown;
+    if (NativeLookup(chronicle, entry.category, entry.row) != nullptr) return Status::Completed;
+    if (entry.runeword || entry.pending) return Status::Missing;
+    return Eligible(item, NativeItemContext(item)) ? Status::Missing : Status::NotTracked;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Completing entries
 // ---------------------------------------------------------------------------
@@ -720,13 +744,7 @@ auto NeedsLine(void* item) noexcept -> bool {
     if (item == nullptr || Read<std::uint32_t>(item, UnitTypeOffset) != UnitItem) return false;
     const auto mode = Read<std::uint32_t>(item, UnitModeOffset);
     if (mode != ModeOnGround && mode != ModeDropping) return false;
-    Entry entry;
-    if (!EntryOf(item, entry)) return false;
-    void* chronicle = ChronicleOf(NativeLocalPlayer(NativeLocalIndex()));
-    if (chronicle == nullptr) return false;
-    if (NativeLookup(chronicle, entry.category, entry.row) != nullptr) return false;
-    if (entry.runeword || entry.pending) return true;
-    return Eligible(item, NativeItemContext(item));
+    return StatusOf(item) == ChronicleService::Status::Missing;
 }
 
 auto Localized(const char* key, std::string& out) noexcept -> bool {
@@ -1010,6 +1028,59 @@ void RegisterStrings() noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// The chronicle service (chronicle_service_api.h)
+// ---------------------------------------------------------------------------
+
+static_assert(std::string_view(PluginIdText) == ChronicleService::ProviderPluginId);
+
+auto __cdecl ItemStatus(const void* item) noexcept -> ChronicleService::Status {
+    if (!ServiceAvailable.load(std::memory_order_relaxed)) return ChronicleService::Status::Unknown;
+    try {
+        return StatusOf(const_cast<void*>(item));
+    } catch (...) {
+        return ChronicleService::Status::Unknown;
+    }
+}
+
+constexpr ChronicleService::ServiceTable ChronicleTable{
+    .structSize = static_cast<std::uint32_t>(sizeof(ChronicleService::ServiceTable)),
+    .reserved   = 0,
+    .itemStatus = &ItemStatus,
+};
+static_assert(sizeof(ChronicleService::ServiceTable) >= ChronicleService::ServiceTableRequiredSize);
+
+// Offers the table. Without the plugin communication service, or when it
+// refuses, the log says so and the rest of the plugin runs as before.
+void PublishChronicleService() noexcept {
+    const D2RL::PluginCommunicationService* communication = nullptr;
+    if (Context->QueryService(&communication) != D2RL::ServiceQueryResult::Success
+            || !D2RL::HasPluginCommunicationServiceField(communication, D2RL::PluginCommunicationServiceRequiredSize)) {
+        ServiceStatus = "off, no plugin communication service";
+        Context->LogWarn("ChronicleTracker: no plugin communication service; the chronicle service is off.");
+        return;
+    }
+    // The table is static: there is no unpublish, so it stays valid until the plugin unloads.
+    const D2RL::PluginCommunication::PublishServiceRequest request{
+        .structSize     = D2RL::PluginCommunication::PublishServiceRequestSize,
+        .flags          = 0,
+        .name           = ChronicleService::ServiceName,
+        .serviceVersion = ChronicleService::ServiceVersion,
+        .tableSize      = ChronicleTable.structSize,
+        .table          = &ChronicleTable,
+    };
+    const auto result = communication->publishService(Context, &request);
+    if (result != D2RL::PluginCommunication::Result::Success) {
+        ServiceStatus = "off, the loader refused it (result " + std::to_string(static_cast<unsigned>(result)) + ")";
+        D2RL::LogWarnF(Context, "ChronicleTracker: the chronicle service could not be offered (result %u).",
+            static_cast<unsigned>(result));
+        return;
+    }
+    ServiceStatus = "offered";
+    D2RL::LogInfoF(Context, "ChronicleTracker: the chronicle service is offered (version %u).",
+        static_cast<unsigned>(ChronicleService::ServiceVersion));
+}
+
+// ---------------------------------------------------------------------------
 // Console command
 // ---------------------------------------------------------------------------
 
@@ -1027,6 +1098,8 @@ auto __cdecl StatusCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext
     std::snprintf(line, sizeof(line), "  completing on pickup and cube outputs: %s.", CompleteStatus.c_str());
     say(line);
     std::snprintf(line, sizeof(line), "  ground label line: %s.", LabelsStatus.c_str());
+    say(line);
+    std::snprintf(line, sizeof(line), "  chronicle service for other plugins: %s.", ServiceStatus.c_str());
     say(line);
     if (!VerifyFailures.empty()) {
         std::snprintf(line, sizeof(line), "  byte check failed: %.440s", VerifyFailures.c_str());
@@ -1081,11 +1154,20 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         return true;
     }
     if (!Config.enabled) {
-        CompleteStatus = LabelsStatus = "disabled by config";
+        CompleteStatus = LabelsStatus = ServiceStatus = "disabled by config";
         Context->LogInfo("ChronicleTracker: disabled by config.");
         return true;
     }
     BindNatives();
+    // The client checks serve the label line and the chronicle service, which
+    // is offered even with the label line off.
+    const bool clientMatches = VerifyWitnesses(ClientWitnesses);
+    if (!clientMatches) {
+        ServiceStatus = "off, this D2R build does not match";
+    } else {
+        ServiceAvailable.store(true);
+        PublishChronicleService();
+    }
     if (!PrepareStubPage()) {
         CompleteStatus = LabelsStatus = "no free page within jump range of the game image";
         Context->LogError("ChronicleTracker: no free page within jump range of the game image; nothing was installed.");
@@ -1103,7 +1185,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
     } else {
         QueryServices();
         RegisterStrings();
-        if (!VerifyWitnesses(ClientWitnesses)) {
+        if (!clientMatches) {
             LabelsStatus = "this D2R build does not match";
         } else if (InstallSites(ClientSites, LabelsStatus)) {
             LabelsActive.store(true);
@@ -1119,6 +1201,7 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     using namespace CC;
     CompleteActive.store(false);
     LabelsActive.store(false);
+    ServiceAvailable.store(false);
     if (Context == nullptr) return;
     for (CallSite& site : ServerSites) RestoreSite(site);
     for (CallSite& site : ClientSites) RestoreSite(site);

@@ -172,6 +172,7 @@ constexpr std::array<NamedNumber, 9> QualityNames{ {
 } };
 constexpr std::array<NamedNumber, 3> TierNames{ { { "normal", 0 }, { "exceptional", 1 }, { "elite", 2 } } };
 constexpr std::array<NamedNumber, 3> DifficultyNames{ { { "normal", 0 }, { "nightmare", 1 }, { "hell", 2 } } };
+constexpr std::array<NamedNumber, 2> ChronicleNames{ { { "missing", 1 }, { "completed", 2 } } };
 
 constexpr std::array<const char*, 13> Languages{
     "enUS", "deDE", "esES", "frFR", "itIT", "koKR", "plPL", "ruRU", "zhCN", "zhTW", "esMX", "jaJP", "ptBR",
@@ -182,11 +183,11 @@ constexpr std::array<const char*, 16> D2rlanColorTags{
     "dark green", "turquoise", "pink", "lilac",
 };
 
-constexpr std::array<const char*, 25> ConditionKeys{
+constexpr std::array<const char*, 26> ConditionKeys{
     "itemCodes", "excludeItemCodes", "itemTypes", "excludeItemTypes", "quality", "baseTier", "itemLevel",
     "sockets", "maxSockets", "isFullySocketed", "isEthereal", "isIdentified", "isRuneword", "uniqueOrSetIds",
     "excludeUniqueOrSetIds", "itemStats", "itemStatsAnyOf", "playerStats", "playerStatsAnyOf", "location",
-    "difficulty", "areas", "excludeAreas", "activeInLevels", "formula",
+    "difficulty", "areas", "excludeAreas", "activeInLevels", "formula", "chronicle",
 };
 
 constexpr std::array<const char*, 15> ActionKeys{
@@ -219,7 +220,7 @@ constexpr std::array<OldKey, 31> OldKeys{ {
     { "background", "use labelBackground" }, { "border", "use labelBorder" }, { "style", "use useStyle" },
     { "name_style", "name styles are not supported" }, { "background_style", "label effects are not supported" },
     { "prefix_desc", "tooltip text is not supported" }, { "suffix_desc", "tooltip text is not supported" },
-    { "grail", "grail conditions are not supported" }, { "filterlevels", "use activeInLevels" },
+    { "grail", "use chronicle (with the Chronicle Tracker)" }, { "filterlevels", "use activeInLevels" },
     { "filter_lvels", "use activeInLevels" },
 } };
 
@@ -642,6 +643,15 @@ private:
             return false;
         }
         out = std::move(formula);
+        return true;
+    }
+
+    // "missing" or "completed" (or 1, 2): the ChronicleStatus that matches.
+    auto ReadChronicle(const Value& value, const std::string& where, std::optional<int>& out) -> bool {
+        out.reset();
+        int status = 0;
+        if (!NamedValue(value, &ChronicleNames, 1, 2, status, where)) return false;
+        out = status;
         return true;
     }
 
@@ -1137,6 +1147,7 @@ private:
             else if (key == "playerStats") ReadStatChecks(value, at, when.playerStats);
             else if (key == "playerStatsAnyOf") ReadStatChecks(value, at, when.playerStatsAnyOf);
             else if (key == "formula") ReadFormula(value, at, when.formula);
+            else if (key == "chronicle") ReadChronicle(value, at, when.chronicle);
             else if (key == "location") ReadLocations(value, at, when.locations);
             else if (key == "areas") ReadIntList(value, at, when.areas, 0, 65535);
             else if (key == "excludeAreas") ReadIntList(value, at, when.excludeAreas, 0, 65535);
@@ -1180,6 +1191,7 @@ private:
                 "without itemCodes this hides every ground item that fails the rule");
         }
         rule.enabled = !ruleFailed_;
+        if (rule.enabled && rule.when.chronicle) program_.usesChronicle = true;
         program_.rules.push_back(std::move(rule));
     }
 };
@@ -1278,6 +1290,8 @@ void ResolveNames(FilterProgram& program, NameResolver& resolver, std::vector<Pr
             rule.then.icon.reset();
         }
     }
+    program.usesChronicle = std::any_of(program.rules.begin(), program.rules.end(),
+        [](const Rule& rule) { return rule.enabled && rule.when.chronicle.has_value(); });
 }
 
 }  // namespace lootfilter

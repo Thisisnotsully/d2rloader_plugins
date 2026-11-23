@@ -111,6 +111,8 @@ auto OtherConditionsPass(const Conditions& when, const ItemSubject& item, const 
         const RuleValues values(item, player);
         if (EvaluateFormula(*when.formula, values) == 0) return false;
     }
+    // Last: the plugin asks another plugin for it.
+    if (when.chronicle && static_cast<int>(item.Chronicle()) != *when.chronicle) return false;
     return true;
 }
 

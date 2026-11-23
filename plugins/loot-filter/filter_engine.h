@@ -20,6 +20,15 @@ namespace lootfilter {
 
 enum class Location : std::uint8_t { Ground, Stored, Equipped, Vendor, Other };
 
+// An item's Chronicle entry for the local character, with the values of the
+// Chronicle Tracker's chronicle service.
+enum class ChronicleStatus : std::uint8_t {
+    NotTracked = 0,  // not a Chronicle item
+    Missing    = 1,
+    Completed  = 2,
+    Unknown    = 3,  // nothing can tell now
+};
+
 class ItemSubject {
 public:
     virtual ~ItemSubject() = default;
@@ -49,6 +58,9 @@ public:
     // The color code character the item's name shows in (the X of ÿcX), after
     // the filter's qualityColors. '\0' when unknown.
     [[nodiscard]] virtual auto NameColor() const -> char = 0;
+    // The item's Chronicle status. The engine asks it last, since the plugin
+    // asks another plugin for it.
+    [[nodiscard]] virtual auto Chronicle() const -> ChronicleStatus { return ChronicleStatus::Unknown; }
 };
 
 // The game's own texts, for {string:KEY}.

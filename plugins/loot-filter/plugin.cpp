@@ -271,6 +271,7 @@
 #pragma comment(lib, "ole32.lib")
 #endif
 
+#include "../chronicle-tracker/chronicle_service_api.h"
 #include "beam_recolor.h"
 #include "editor_bridge.h"
 #include "filter_engine.h"
@@ -2243,6 +2244,54 @@ auto HighestParam(void* unit, int stat, int skill) -> std::int32_t {
     return best;
 }
 
+// ---------------------------------------------------------------------------
+//  The "chronicle" condition, answered by the Chronicle Tracker's service
+// ---------------------------------------------------------------------------
+// Acquired the first time an item is asked, so a filter without the condition
+// never touches it, and tried again at most every 5 seconds while it is not
+// there (plugins load in no set order). UI thread, as the service asks.
+constexpr ULONGLONG ChronicleRetryMs = 5000;
+
+D2RL::PluginCommunication::ServiceLease<ChronicleService::ServiceTable> ChronicleLease;
+ULONGLONG                  ChronicleTriedAt{};
+std::atomic<int>           ChronicleState{};   // 0 not asked yet, 1 acquired, 2 not available
+std::atomic<std::uint32_t> ChronicleFailure{}; // the last failure's result
+
+auto ChronicleStatusOf(void* unit) -> ChronicleStatus {
+    if (!ChronicleLease) {
+        const ULONGLONG now = GetTickCount64();
+        if (ChronicleState.load() == 2 && now - ChronicleTriedAt < ChronicleRetryMs) return ChronicleStatus::Unknown;
+        ChronicleTriedAt = now;
+        const D2RL::PluginCommunicationService* communication = nullptr;
+        auto result = D2RL::PluginCommunication::Result::Unavailable;
+        if (Context->QueryService(&communication) == D2RL::ServiceQueryResult::Success
+            && D2RL::HasPluginCommunicationServiceField(communication, D2RL::PluginCommunicationServiceRequiredSize)) {
+            result = D2RL::PluginCommunication::Acquire(Context, communication, ChronicleService::ProviderPluginId,
+                ChronicleService::ServiceName, ChronicleService::ServiceVersion, ChronicleService::ServiceTableRequiredSize,
+                &ChronicleLease);
+        }
+        if (result != D2RL::PluginCommunication::Result::Success || !ChronicleLease || ChronicleLease->itemStatus == nullptr) {
+            ChronicleLease.Reset();
+            const auto code = static_cast<std::uint32_t>(result);
+            const bool repeated = ChronicleState.exchange(2) == 2 && ChronicleFailure.load() == code;
+            ChronicleFailure.store(code);
+            if (!repeated) {
+                LogWarn("LootFilter: chronicle conditions do not match: the Chronicle Tracker's chronicle service is not available "
+                        "(result %u).", static_cast<unsigned>(code));
+            }
+            return ChronicleStatus::Unknown;
+        }
+        ChronicleState.store(1);
+        LogInfo("LootFilter: the Chronicle Tracker's chronicle service is acquired (version %u).", static_cast<unsigned>(ChronicleLease.Version()));
+    }
+    switch (ChronicleLease->itemStatus(unit)) {
+    case ChronicleService::Status::NotTracked: return ChronicleStatus::NotTracked;
+    case ChronicleService::Status::Missing:    return ChronicleStatus::Missing;
+    case ChronicleService::Status::Completed:  return ChronicleStatus::Completed;
+    default:                                   return ChronicleStatus::Unknown;
+    }
+}
+
 class GamePlayer final : public PlayerSubject {
 public:
     explicit GamePlayer(void* unit) : unit_(unit) {}
@@ -2364,6 +2413,7 @@ public:
         const std::uint32_t color = FilterColor(quality, pick(unit_, record, quality), TooltipPlainColors);
         return color <= 42 ? static_cast<char>('0' + color) : '\0';
     }
+    [[nodiscard]] auto Chronicle() const -> ChronicleStatus override { return ChronicleStatusOf(unit_); }
 
 private:
     void*                                unit_;
@@ -2484,6 +2534,7 @@ auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::Hove
     out.gold          = item.IsGold();
     out.hidden        = outcome.hidden;
     out.nameChanged   = outcome.nameChanged;
+    out.chronicle     = static_cast<std::uint8_t>(item.Chronicle());
     out.hiddenBy      = outcome.hiddenBy;
     out.matchedCount  = static_cast<std::uint32_t>(outcome.matchedRules.size());
     for (std::size_t i = 0; i < outcome.matchedRules.size() && i < LootFilterBridge::MaxMatchedRules; ++i) {
@@ -3874,6 +3925,18 @@ auto __cdecl StatusCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext
         std::snprintf(message, sizeof(message), "No filter selected.");
     }
     command->plugin->WriteConsoleMessage(message);
+    const int chronicle = ChronicleState.load();
+    if (chronicle == 1) {
+        std::snprintf(message, sizeof(message), "Chronicle service: acquired.");
+    } else if (!filter.program || !filter.program->usesChronicle) {
+        std::snprintf(message, sizeof(message), "Chronicle service: not used by this filter.");
+    } else if (chronicle == 2) {
+        std::snprintf(message, sizeof(message), "Chronicle service: not acquired (result %u), so chronicle conditions do not match. "
+            "Is the Chronicle Tracker installed and enabled?", static_cast<unsigned>(ChronicleFailure.load()));
+    } else {
+        std::snprintf(message, sizeof(message), "Chronicle service: not acquired yet (no item asked).");
+    }
+    command->plugin->WriteConsoleMessage(message);
     std::snprintf(message, sizeof(message), "Language %s. Your filters: %s. Mod filters: %s.", LanguageNow().c_str(),
         Narrow(UserFolder).c_str(), Narrow(ShippedFolder).c_str());
     command->plugin->WriteConsoleMessage(message);
@@ -4156,4 +4219,5 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     RestoreSetNameColor();
     UnregisterIcons();
     sound::Shutdown();
+    (void)ChronicleLease.Reset();
 }
