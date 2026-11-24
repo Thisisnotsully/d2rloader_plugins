@@ -2230,6 +2230,19 @@ void ForEachParam(void* unit, int stat, Visit&& visit) {
     for (std::size_t i = low; i < count && entries[i].stat == static_cast<std::uint32_t>(stat); ++i) visit(entries[i].param, entries[i].value);
 }
 
+// Calls visit(stat, param, stored value) for every entry on the unit, in list order.
+template <typename Visit>
+void ForEachStat(void* unit, Visit&& visit) {
+    if (!WideStatsChecked || unit == nullptr) return;
+    const auto* list = ReadAt<const std::uint8_t*>(static_cast<const std::uint8_t*>(unit), UnitStatListOffset);
+    if (list == nullptr) return;
+    const std::size_t at = ReadAt<std::int32_t>(list, StatListFlagsOffset) < 0 ? FullStatsOffset : PlainStatsOffset;
+    const auto* entries = ReadAt<const WideStatEntry*>(list, at);
+    const std::uint64_t count = ReadAt<std::uint64_t>(list, at + 8);
+    if (entries == nullptr || count == 0 || count > 0x100000) return;
+    for (std::uint64_t i = 0; i < count; ++i) visit(entries[i].stat, entries[i].param, entries[i].value);
+}
+
 // The highest tooltip number among a stat's entries, optionally only those for one skill.
 auto HighestParam(void* unit, int stat, int skill) -> std::int32_t {
     const StatDisplayTable& table = StatRows();
@@ -2591,6 +2604,22 @@ auto BridgeRuleTitle(std::int32_t ruleNumber, std::string& title) -> LootFilterB
     return LootFilterBridge::Result::NotFound;
 }
 
+// Every stat of the ground item `unitId`, with the numbers itemStats checks
+// compare. None for an unidentified item. UI thread.
+auto BridgeItemStats(std::uint32_t unitId, std::vector<LootFilterBridge::ItemStat>& out) -> LootFilterBridge::Result {
+    void* unit = ClientUnit(unitId, UnitTypeItem);
+    if (unit == nullptr || !IsItem(unit)) return LootFilterBridge::Result::NoItem;
+    GameItem item(unit);
+    if (!item.Valid() || item.Where() != Location::Ground) return LootFilterBridge::Result::NoItem;
+    if (!item.Identified()) return LootFilterBridge::Result::Success;
+    ForEachStat(unit, [&](std::uint32_t stat, std::uint32_t param, std::int32_t stored) {
+        if (stat >= 0x8000) return;
+        const int id = static_cast<int>(stat);
+        out.push_back({ .stat = id, .param = param, .value = TooltipStat(id, param, stored), .stored = stored });
+    });
+    return LootFilterBridge::Result::Success;
+}
+
 auto BridgeActive() -> bool { return Active.load(); }
 
 // Offered only once the plugin is active; the filter works the same without it.
@@ -2601,6 +2630,7 @@ void PublishEditorBridge() noexcept {
         .filterState  = &BridgeFilterState,
         .ruleTitle    = &BridgeRuleTitle,
         .queueChat    = &QueueOwnChat,
+        .itemStats    = &BridgeItemStats,
     });
 }
 

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace D2RL {
 struct PluginContext;
@@ -34,6 +35,9 @@ struct Callbacks {
     LootFilterBridge::Result (*ruleTitle)(std::int32_t ruleNumber, std::string& title);
     // Queues a line as one of the plugin's own. Any thread.
     void (*queueChat)(std::string line);
+    // Every stat of the item `unitId` if it is still an item on the ground,
+    // else NoItem; an unidentified item gives Success and no stats. UI thread.
+    LootFilterBridge::Result (*itemStats)(std::uint32_t unitId, std::vector<LootFilterBridge::ItemStat>& stats);
 };
 
 // Offers the table through the plugin communication service. Without that

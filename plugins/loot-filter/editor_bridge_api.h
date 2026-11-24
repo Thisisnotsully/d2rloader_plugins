@@ -51,6 +51,14 @@ enum class Result : uint32_t {
 inline constexpr uint32_t MaxMatchedRules = 64;
 inline constexpr uint32_t MaxLevels       = 16;
 
+// One entry of an item's stat list (itemstatcost.txt ids).
+struct ItemStat {
+    int32_t  stat;    // itemstatcost.txt row
+    uint32_t param;   // the stat's parameter (a skill, a skill tab, ...); 0 for most stats
+    int32_t  value;   // the number the filter's itemStats checks compare, as the tooltip shows it
+    int32_t  stored;  // the raw value in the stat list
+};
+
 // The ground item the player points at: under the mouse cursor, or the item a
 // controller has targeted, as the game itself decided a moment ago. Items the
 // filter hides cannot be pointed at, unless Show Hidden Items is on (or the
@@ -126,10 +134,20 @@ struct ServiceTable {
     // Prints a line in the chat window, like the loot filter's own lines
     // (ÿc color codes work). Queued: it shows on the next UI tick.
     Result(__cdecl* printChat)(const char* utf8) noexcept;
+
+    // Every stat of the ground item `unitId` (HoveredItem::unitId from a
+    // getHoveredItem call): base stats, automods and affixes alike, in the
+    // game's order. Writes up to `capacity` entries; *count gets how many the
+    // item has, and BufferTooSmall when that is more than `capacity`.
+    // An unidentified item answers Success with *count 0: its stats are not
+    // known to the player. NoItem when the item is gone or no longer on the ground.
+    // UI thread only.
+    Result(__cdecl* getItemStats)(uint32_t unitId, ItemStat* stats, uint32_t capacity, uint32_t* count) noexcept;
 };
 
-inline constexpr uint32_t ServiceTableRequiredSize = static_cast<uint32_t>(offsetof(ServiceTable, printChat) + sizeof(void*));
+inline constexpr uint32_t ServiceTableRequiredSize = static_cast<uint32_t>(offsetof(ServiceTable, getItemStats) + sizeof(void*));
 
+static_assert(std::is_standard_layout_v<ItemStat> && std::is_trivially_copyable_v<ItemStat> && sizeof(ItemStat) == 16);
 static_assert(std::is_standard_layout_v<HoveredItem> && std::is_trivially_copyable_v<HoveredItem>);
 static_assert(std::is_standard_layout_v<FilterState> && std::is_trivially_copyable_v<FilterState>);
 static_assert(std::is_standard_layout_v<ServiceTable> && std::is_trivially_copyable_v<ServiceTable>);

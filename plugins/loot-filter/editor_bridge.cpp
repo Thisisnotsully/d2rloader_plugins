@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace CelestialRayOne::LootFilter::EditorBridge {
 namespace {
@@ -139,6 +140,24 @@ auto __cdecl PrintChat(const char* utf8) noexcept -> Result {
     }
 }
 
+auto __cdecl GetItemStats(std::uint32_t unitId, LootFilterBridge::ItemStat* stats, std::uint32_t capacity, std::uint32_t* count) noexcept -> Result {
+    try {
+        if (!IsActive()) return Result::NotActive;
+        if (count == nullptr || (stats == nullptr && capacity != 0)) return Result::InvalidArgument;
+        *count = 0;
+        std::vector<LootFilterBridge::ItemStat> all;
+        const Result result = Calls.itemStats(unitId, all);
+        if (result != Result::Success) return result;
+        if (all.size() > std::numeric_limits<std::uint32_t>::max()) return Result::Failed;
+        *count = static_cast<std::uint32_t>(all.size());
+        const std::size_t written = std::min<std::size_t>(all.size(), capacity);
+        if (written != 0) std::memcpy(stats, all.data(), written * sizeof(LootFilterBridge::ItemStat));
+        return all.size() > capacity ? Result::BufferTooSmall : Result::Success;
+    } catch (...) {
+        return Result::Failed;
+    }
+}
+
 constexpr LootFilterBridge::ServiceTable Table{
     .structSize     = static_cast<std::uint32_t>(sizeof(LootFilterBridge::ServiceTable)),
     .reserved       = 0,
@@ -146,6 +165,7 @@ constexpr LootFilterBridge::ServiceTable Table{
     .getFilterState = &GetFilterState,
     .getRuleTitle   = &GetRuleTitle,
     .printChat      = &PrintChat,
+    .getItemStats   = &GetItemStats,
 };
 static_assert(sizeof(LootFilterBridge::ServiceTable) >= LootFilterBridge::ServiceTableRequiredSize);
 
@@ -154,7 +174,7 @@ static_assert(sizeof(LootFilterBridge::ServiceTable) >= LootFilterBridge::Servic
 void Publish(const D2RL::PluginContext* context, const Callbacks& callbacks) noexcept {
     if (context == nullptr) return;
     if (callbacks.active == nullptr || callbacks.describeItem == nullptr || callbacks.filterState == nullptr
-        || callbacks.ruleTitle == nullptr || callbacks.queueChat == nullptr) {
+        || callbacks.ruleTitle == nullptr || callbacks.queueChat == nullptr || callbacks.itemStats == nullptr) {
         context->LogWarn("LootFilter: the editor bridge is incomplete and was not offered.");
         return;
     }
