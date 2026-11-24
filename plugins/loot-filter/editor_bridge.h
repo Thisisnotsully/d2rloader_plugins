@@ -49,7 +49,8 @@ void Publish(const D2RL::PluginContext* context, const Callbacks& callbacks) noe
 // item they accept, so it only stores; it reads nothing. UI thread.
 void NoteHover(void* unit, std::uint32_t unitId) noexcept;
 
-// `text` without the game's color codes (ÿc and the character after it).
-auto PlainText(std::string_view text) -> std::string;
+// `text` without color codes: ÿc, or the game's own marker when given, and
+// the character after it.
+auto PlainText(std::string_view text, std::string_view gameMarker = {}) -> std::string;
 
 }  // namespace CelestialRayOne::LootFilter::EditorBridge

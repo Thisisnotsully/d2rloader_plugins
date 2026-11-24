@@ -213,19 +213,31 @@ void NoteHover(void* unit, std::uint32_t unitId) noexcept {
     HoverTime.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 }
 
-auto PlainText(std::string_view text) -> std::string {
+auto PlainText(std::string_view text, std::string_view gameMarker) -> std::string {
     constexpr std::string_view code = "\xC3\xBF" "c";
+    // The first of the two markers at `pos`, and its length; npos when neither is there.
+    const auto next = [&](std::size_t pos, std::size_t& length) -> std::size_t {
+        const std::size_t a = text.find(code, pos);
+        const std::size_t b = gameMarker.empty() ? std::string_view::npos : text.find(gameMarker, pos);
+        if (b < a) {
+            length = gameMarker.size();
+            return b;
+        }
+        length = code.size();
+        return a;
+    };
     std::string out;
     out.reserve(text.size());
     std::size_t pos = 0;
     while (pos < text.size()) {
-        const std::size_t found = text.find(code, pos);
+        std::size_t length = 0;
+        const std::size_t found = next(pos, length);
         if (found == std::string_view::npos) {
             out.append(text.substr(pos));
             break;
         }
         out.append(text.substr(pos, found - pos));
-        pos = found + code.size();
+        pos = found + length;
         // The color character: one byte, or one whole UTF-8 character should a text use another.
         if (pos < text.size()) {
             ++pos;

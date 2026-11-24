@@ -2534,7 +2534,7 @@ auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::Hove
     }
     out.unitId        = unitId;
     CopyLimited(out.code, sizeof(out.code), UnpackItemCode(item.Code()));
-    CopyLimited(out.name, sizeof(out.name), EditorBridge::PlainText(item.DisplayName()));
+    CopyLimited(out.name, sizeof(out.name), EditorBridge::PlainText(item.DisplayName(), Marker()));
     out.quality       = item.Quality();
     out.baseTier      = item.BaseTier();
     out.itemLevel     = item.ItemLevel();
