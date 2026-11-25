@@ -35,7 +35,7 @@ namespace LootFilterBridge {
 
 inline constexpr char     ProviderPluginId[] = "celestialrayone.loot-filter";
 inline constexpr char     ServiceName[]      = "editor-bridge";
-inline constexpr uint32_t ServiceVersion     = 1;
+inline constexpr uint32_t ServiceVersion     = 2;  // 2: items in inventories, the stash, the cube, equipped or at a vendor too
 
 enum class Result : uint32_t {
     Success         = 0,
@@ -59,10 +59,24 @@ struct ItemStat {
     int32_t  stored;  // the raw value in the stat list
 };
 
-// The ground item the player points at: under the mouse cursor, or the item a
-// controller has targeted, as the game itself decided a moment ago. Items the
-// filter hides cannot be pointed at, unless Show Hidden Items is on (or the
-// game's own item filter toggle is off; gold can always be pointed at).
+// Where a pointed-at item is (HoveredItem::location).
+enum class ItemLocation : uint8_t {
+    Ground   = 0,
+    Stored   = 1,  // an inventory, the stash, the cube, the belt
+    Equipped = 2,
+    Vendor   = 3,
+    Other    = 4,
+};
+
+// The item the player points at: a ground item under the mouse cursor or the
+// item a controller has targeted, as the game itself decided a moment ago, or
+// (version 2) the item whose tooltip the game is showing: in an inventory, the
+// stash, the cube, equipped, at a vendor. Whichever of the two the game showed
+// last. Ground items the filter hides cannot be pointed at, unless Show Hidden
+// Items is on (or the game's own item filter toggle is off; gold can always be
+// pointed at). An item that is not on the ground is judged as if it had just
+// dropped in the player's area: hidden, hiddenBy and matchedRules say what the
+// filter would do with it there.
 // Texts are UTF-8 without color codes and always end with a zero.
 struct HoveredItem {
     uint32_t structSize;          // set by the caller
@@ -83,7 +97,7 @@ struct HoveredItem {
     uint8_t  hidden;              // a rule hides it (it can only be pointed at with Show Hidden Items on)
     uint8_t  nameChanged;
     uint8_t  chronicle;           // ChronicleService::Status values: 0 not a Chronicle item, 1 missing, 2 completed, 3 unknown
-    uint8_t  reserved;
+    uint8_t  location;            // ItemLocation (version 2; 0, on the ground, from a version 1 bridge)
     int32_t  hiddenBy;            // the hiding rule's number; -1 hideUnmatchedItems; 0 not hidden
     uint32_t matchedCount;        // every rule that matched, possibly more than the list holds
     int32_t  matchedRules[MaxMatchedRules];  // rule numbers (1-based file order), in order
@@ -135,12 +149,13 @@ struct ServiceTable {
     // (ÿc color codes work). Queued: it shows on the next UI tick.
     Result(__cdecl* printChat)(const char* utf8) noexcept;
 
-    // Every stat of the ground item `unitId` (HoveredItem::unitId from a
+    // Every stat of the item `unitId` (HoveredItem::unitId from a
     // getHoveredItem call): base stats, automods and affixes alike, in the
     // game's order. Writes up to `capacity` entries; *count gets how many the
     // item has, and BufferTooSmall when that is more than `capacity`.
     // An unidentified item answers Success with *count 0: its stats are not
-    // known to the player. NoItem when the item is gone or no longer on the ground.
+    // known to the player. NoItem when the item is gone (version 1: or no
+    // longer on the ground; version 2 also answers for carried items).
     // UI thread only.
     Result(__cdecl* getItemStats)(uint32_t unitId, ItemStat* stats, uint32_t capacity, uint32_t* count) noexcept;
 };

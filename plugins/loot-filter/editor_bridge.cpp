@@ -19,8 +19,8 @@ using LootFilterBridge::FilterState;
 using LootFilterBridge::HoveredItem;
 using LootFilterBridge::Result;
 
-// A hover older than this is over: the select tests run every frame while
-// something is pointed at.
+// A hover older than this is over: the select tests run, and a tooltip is
+// built, every frame while something is pointed at.
 constexpr std::chrono::milliseconds MaxHoverAge{ 200 };
 
 // The smallest struct a caller may pass: structSize and the first field.
@@ -35,6 +35,21 @@ Callbacks Calls{};
 std::atomic<void*>                                   HoverUnit{};
 std::atomic<std::uint32_t>                           HoverId{};
 std::atomic<std::chrono::steady_clock::duration::rep> HoverTime{};
+// The last tooltip, the same way.
+std::atomic<void*>                                   TooltipUnit{};
+std::atomic<std::uint32_t>                           TooltipId{};
+std::atomic<std::chrono::steady_clock::duration::rep> TooltipTime{};
+
+// Tooltips drawn closer together than this are one frame's: the first is kept.
+constexpr std::chrono::milliseconds SameFrame{ 2 };  // a frame at 240 fps is 4 ms; one frame's tooltips come microseconds apart
+
+auto Now() -> std::chrono::steady_clock::duration::rep { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+
+// How long ago `time` was, or a negative duration for a time never set.
+auto Age(std::chrono::steady_clock::duration::rep time) -> std::chrono::steady_clock::duration {
+    if (time == 0) return std::chrono::steady_clock::duration(-1);
+    return std::chrono::steady_clock::now().time_since_epoch() - std::chrono::steady_clock::duration(time);
+}
 
 auto IsActive() -> bool {
     return Calls.active != nullptr && Calls.active();
@@ -67,10 +82,14 @@ auto __cdecl GetHoveredItem(HoveredItem* item) noexcept -> Result {
         if (!IsActive()) return Result::NotActive;
         const std::uint32_t size = CallerSize(item, HoveredItemMinimum);
         if (size == 0) return Result::InvalidArgument;
-        const auto time = HoverTime.load(std::memory_order_acquire);
-        void* const unit = HoverUnit.load(std::memory_order_relaxed);
-        const std::uint32_t id = HoverId.load(std::memory_order_relaxed);
-        const auto age = std::chrono::steady_clock::now().time_since_epoch() - std::chrono::steady_clock::duration(time);
+        // The newer of the ground hover and the tooltip, if it is still being shown.
+        const auto groundTime = HoverTime.load(std::memory_order_acquire);
+        const auto tooltipTime = TooltipTime.load(std::memory_order_acquire);
+        const bool tooltip = tooltipTime > groundTime;
+        const auto time = tooltip ? tooltipTime : groundTime;
+        void* const unit = tooltip ? TooltipUnit.load(std::memory_order_relaxed) : HoverUnit.load(std::memory_order_relaxed);
+        const std::uint32_t id = tooltip ? TooltipId.load(std::memory_order_relaxed) : HoverId.load(std::memory_order_relaxed);
+        const auto age = Age(time);
         if (unit == nullptr || age < std::chrono::steady_clock::duration::zero() || age > MaxHoverAge) return Result::NoItem;
         HoveredItem answer{};
         const Result result = Calls.describeItem(unit, id, answer);
@@ -210,7 +229,18 @@ void Publish(const D2RL::PluginContext* context, const Callbacks& callbacks) noe
 void NoteHover(void* unit, std::uint32_t unitId) noexcept {
     HoverUnit.store(unit, std::memory_order_relaxed);
     HoverId.store(unitId, std::memory_order_relaxed);
-    HoverTime.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
+    HoverTime.store(Now(), std::memory_order_release);
+}
+
+void NoteTooltip(void* unit, std::uint32_t unitId) noexcept {
+    const auto previous = TooltipTime.load(std::memory_order_relaxed);
+    const auto age = Age(previous);
+    if (age >= std::chrono::steady_clock::duration::zero() && age < SameFrame && TooltipId.load(std::memory_order_relaxed) != unitId) {
+        return;  // a second tooltip in the same frame: the comparison, not the hovered item
+    }
+    TooltipUnit.store(unit, std::memory_order_relaxed);
+    TooltipId.store(unitId, std::memory_order_relaxed);
+    TooltipTime.store(Now(), std::memory_order_release);
 }
 
 auto PlainText(std::string_view text, std::string_view gameMarker) -> std::string {

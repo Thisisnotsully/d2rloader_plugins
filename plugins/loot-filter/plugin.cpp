@@ -2428,6 +2428,12 @@ public:
     }
     [[nodiscard]] auto Chronicle() const -> ChronicleStatus override { return ChronicleStatusOf(unit_); }
 
+    // Judged as if it had just dropped in `area` (the editor bridge, for a carried item).
+    void PretendDropped(int area) {
+        location_ = Location::Ground;
+        area_ = area;
+    }
+
 private:
     void*                                unit_;
     const std::uint8_t*                  data_;
@@ -2513,6 +2519,39 @@ auto Evaluate(void* unit, Outcome& out) -> bool {
     return true;
 }
 
+// The local player's area, -1 when not known.
+auto PlayerArea() -> int {
+    if (void* player = LocalPlayerUnit()) {
+        if (void* room = UnitRoom(player)) {
+            if (std::uint8_t* data = RoomData(room)) return RoomLevelId(data);
+        }
+    }
+    return -1;
+}
+
+// `unit`, a carried item, judged as if it had just dropped where the player
+// is (never cached: the real answer for that item is kept for its tooltip).
+auto EvaluateAsDropped(void* unit, Outcome& out) -> bool {
+    if (!Active.load() || !IsItem(unit)) return false;
+    LoadedFilter filter;
+    bool playSounds = true;
+    if (!Snapshot(filter, playSounds)) return false;
+    GameItem item(unit);
+    if (!item.Valid()) return false;
+    item.PretendDropped(PlayerArea());
+    GamePlayer player(LocalPlayerUnit());
+    EvalSettings settings;
+    settings.level = filter.level;
+    settings.language = LanguageNow();
+    settings.strings = &Strings;
+    try {
+        lootfilter::Evaluate(*filter.program, item, &player, settings, out);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //  Editor bridge: what other plugins may read (editor_bridge_api.h)
 // ---------------------------------------------------------------------------
@@ -2524,10 +2563,12 @@ auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::Hove
     // Looked up by id first, so a unit the game already freed is never read.
     if (ClientUnit(unitId, UnitTypeItem) != unit || !IsItem(unit)) return LootFilterBridge::Result::NoItem;
     GameItem item(unit);
-    if (!item.Valid() || item.Where() != Location::Ground) return LootFilterBridge::Result::NoItem;
+    if (!item.Valid() || item.Where() == Location::Other) return LootFilterBridge::Result::NoItem;
+    const Location where = item.Where();
     const std::uint64_t revision = Revision.load();  // read first: an answer is never newer than its revision
     Outcome outcome;
-    if (!Evaluate(unit, outcome)) {
+    // A carried item: what the filter would do if it dropped here.
+    if (!(where == Location::Ground ? Evaluate(unit, outcome) : EvaluateAsDropped(unit, outcome))) {
         // Without a filter the item has no outcome; with one, evaluating failed.
         std::shared_lock<std::shared_mutex> lock(FilterLock);
         if (Current.program) return LootFilterBridge::Result::Failed;
@@ -2548,6 +2589,11 @@ auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::Hove
     out.hidden        = outcome.hidden;
     out.nameChanged   = outcome.nameChanged;
     out.chronicle     = static_cast<std::uint8_t>(item.Chronicle());
+    out.location      = static_cast<std::uint8_t>(where == Location::Ground     ? LootFilterBridge::ItemLocation::Ground
+                                                  : where == Location::Stored   ? LootFilterBridge::ItemLocation::Stored
+                                                  : where == Location::Equipped ? LootFilterBridge::ItemLocation::Equipped
+                                                  : where == Location::Vendor   ? LootFilterBridge::ItemLocation::Vendor
+                                                                                : LootFilterBridge::ItemLocation::Other);
     out.hiddenBy      = outcome.hiddenBy;
     out.matchedCount  = static_cast<std::uint32_t>(outcome.matchedRules.size());
     for (std::size_t i = 0; i < outcome.matchedRules.size() && i < LootFilterBridge::MaxMatchedRules; ++i) {
@@ -2610,7 +2656,7 @@ auto BridgeItemStats(std::uint32_t unitId, std::vector<LootFilterBridge::ItemSta
     void* unit = ClientUnit(unitId, UnitTypeItem);
     if (unit == nullptr || !IsItem(unit)) return LootFilterBridge::Result::NoItem;
     GameItem item(unit);
-    if (!item.Valid() || item.Where() != Location::Ground) return LootFilterBridge::Result::NoItem;
+    if (!item.Valid() || item.Where() == Location::Other) return LootFilterBridge::Result::NoItem;
     if (!item.Identified()) return LootFilterBridge::Result::Success;
     ForEachStat(unit, [&](std::uint32_t stat, std::uint32_t param, std::int32_t stored) {
         if (stat >= 0x8000) return;
@@ -2637,6 +2683,11 @@ void PublishEditorBridge() noexcept {
 // The editor bridge's hovered item: the last item a select test accepted.
 void NoteHoveredItem(void* unit) noexcept {
     if (IsItem(unit)) EditorBridge::NoteHover(unit, ReadAt<std::uint32_t>(static_cast<const std::uint8_t*>(unit), UnitIdOffset));
+}
+
+// ... or the item whose tooltip the game draws (an inventory, the stash, the cube, equipped, a vendor).
+void NoteTooltipItem(void* unit) noexcept {
+    if (IsItem(unit)) EditorBridge::NoteTooltip(unit, ReadAt<std::uint32_t>(static_cast<const std::uint8_t*>(unit), UnitIdOffset));
 }
 
 // ---------------------------------------------------------------------------
@@ -3337,6 +3388,7 @@ void* __fastcall HookGetItemName(void* item, char* buffer) noexcept {
     void* const result = OriginalGetItemName(item, buffer);
     const std::uint64_t returnRva = ReturnRva(returnAddress);
     if (returnRva == GroundLabelReturnRva) NameHookRan = true;
+    else if (IsNameCaller(returnRva)) NoteTooltipItem(item);  // a tooltip's name: for the editor bridge; only records it
     if (buffer == nullptr || !IsNameCaller(returnRva)) return result;
     try {
         Outcome outcome;
