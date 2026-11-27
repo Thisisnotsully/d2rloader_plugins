@@ -35,7 +35,8 @@ namespace LootFilterBridge {
 
 inline constexpr char     ProviderPluginId[] = "celestialrayone.loot-filter";
 inline constexpr char     ServiceName[]      = "editor-bridge";
-inline constexpr uint32_t ServiceVersion     = 2;  // 2: items in inventories, the stash, the cube, equipped or at a vendor too
+inline constexpr uint32_t ServiceVersion     = 3;  // 2: items in inventories, the stash, the cube, equipped or at a vendor too
+                                                   // 3: in town, items are judged as if outside town (judgedOutsideTown)
 
 enum class Result : uint32_t {
     Success         = 0,
@@ -76,7 +77,11 @@ enum class ItemLocation : uint8_t {
 // Items is on (or the game's own item filter toggle is off; gold can always be
 // pointed at). An item that is not on the ground is judged as if it had just
 // dropped in the player's area: hidden, hiddenBy and matchedRules say what the
-// filter would do with it there.
+// filter would do with it there. (Version 3) While the player is in a town,
+// every item, on the ground or carried, is judged as if it had dropped outside
+// town (in no particular area), because filters usually show everything in
+// town and the player wants to see what happens out in the field; then
+// judgedOutsideTown is 1.
 // Texts are UTF-8 without color codes and always end with a zero.
 struct HoveredItem {
     uint32_t structSize;          // set by the caller
@@ -102,6 +107,9 @@ struct HoveredItem {
     uint32_t matchedCount;        // every rule that matched, possibly more than the list holds
     int32_t  matchedRules[MaxMatchedRules];  // rule numbers (1-based file order), in order
     uint64_t filterRevision;      // FilterState::revision this answer belongs to
+    // Version 3:
+    uint8_t  judgedOutsideTown;   // 1: the player is in a town, and the answer is for outside town
+    uint8_t  reserved3[7];
 };
 
 // The loaded filter. Texts are UTF-8 and end with a zero; level names are in

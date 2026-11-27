@@ -2529,16 +2529,22 @@ auto PlayerArea() -> int {
     return -1;
 }
 
-// `unit`, a carried item, judged as if it had just dropped where the player
-// is (never cached: the real answer for that item is kept for its tooltip).
-auto EvaluateAsDropped(void* unit, Outcome& out) -> bool {
+// The five act towns (levels.txt ids).
+auto IsTownArea(int area) -> bool {
+    return area == 1 || area == 40 || area == 75 || area == 103 || area == 109;
+}
+
+// `unit` judged as if it had just dropped in `area` (-1: no particular area),
+// for the editor bridge (never cached: the real answer for that item is kept
+// for its tooltip and label).
+auto EvaluateAsDropped(void* unit, int area, Outcome& out) -> bool {
     if (!Active.load() || !IsItem(unit)) return false;
     LoadedFilter filter;
     bool playSounds = true;
     if (!Snapshot(filter, playSounds)) return false;
     GameItem item(unit);
     if (!item.Valid()) return false;
-    item.PretendDropped(PlayerArea());
+    item.PretendDropped(area);
     GamePlayer player(LocalPlayerUnit());
     EvalSettings settings;
     settings.level = filter.level;
@@ -2567,8 +2573,14 @@ auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::Hove
     const Location where = item.Where();
     const std::uint64_t revision = Revision.load();  // read first: an answer is never newer than its revision
     Outcome outcome;
-    // A carried item: what the filter would do if it dropped here.
-    if (!(where == Location::Ground ? Evaluate(unit, outcome) : EvaluateAsDropped(unit, outcome))) {
+    // A carried item: what the filter would do if it dropped here. In town: what it would do outside town, for a
+    // ground item too (filters usually show everything in town).
+    const int playerArea = PlayerArea();
+    const bool inTown = IsTownArea(playerArea);
+    const bool judged = inTown ? EvaluateAsDropped(unit, -1, outcome)
+                      : where == Location::Ground ? Evaluate(unit, outcome)
+                                                  : EvaluateAsDropped(unit, playerArea, outcome);
+    if (!judged) {
         // Without a filter the item has no outcome; with one, evaluating failed.
         std::shared_lock<std::shared_mutex> lock(FilterLock);
         if (Current.program) return LootFilterBridge::Result::Failed;
@@ -2600,6 +2612,7 @@ auto BridgeDescribeItem(void* unit, std::uint32_t unitId, LootFilterBridge::Hove
         out.matchedRules[i] = outcome.matchedRules[i];
     }
     out.filterRevision = revision;
+    out.judgedOutsideTown = inTown ? 1 : 0;
     return LootFilterBridge::Result::Success;
 }
 
